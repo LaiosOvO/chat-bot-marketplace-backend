@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Audio Recorder and Playback</title>
+</head>
+
+<body>
+  <h1>Audio Recorder and Playback</h1>
+  <button id="startRecord">Start Recording</button>
+  <button id="stopRecord" disabled>Stop Recording</button>
+  <audio id="audioPlayback" controls></audio>
+
+  <script>
+    let mediaRecorder;
+    let chunks = [];
+    let eventSource;
+    let audioContext;
+    let source;
+    let buffer = '';
+    let audioDataArray = [];
+    let audio = document.getElementById('audioPlayback');
+
+    document.getElementById("startRecord").addEventListener("click", function () {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+     .then(stream => {
+          mediaRecorder = new MediaRecorder(stream);
+          mediaRecorder.start();
+          mediaRecorder.ondataavailable = event => {
+            chunks.push(event.data);
+          };
+          mediaRecorder.onstop = () => {
+            const blob = new Blob(chunks, { type: 'audio/ogg; codecs=opus' });
+            chunks = [];
+            const audioURL = URL.createObjectURL(blob);
+            audio.src = audioURL;
+
+            // Send the recorded audio to the server as POST request
+            const formData = new FormData();
+            formData.append("audio_file", blob, "recording.ogg");
+            fetch('http://localhost:8080/asr-stream-chat', {
+              method: 'POST',
+              body: formData
+            })
+           .then(response => {
+                if (response.headers.get('Content-Type').includes('text/event-stream')) {
+                  console.log("建立sse连接")
+                  eventSource = new EventSource(response.url);
+                  audioContext = new AudioContext();
+                  console.log(eventSource)
+                  console.log(audioContext)
+                  eventSource.onmessage = event => {
+                    const data = event.data;
+                    console.log("数据包如下 \n",data);
+                    if (data.startsWith('data: ')) {
+                      buffer += data.slice(6);
+                      if (buffer.endsWith('\n\n')) {
+                        const audioData = buffer.slice(0, -2);
+                        audioDataArray.push(audioData);
+                        buffer = '';
+                        if (audioDataArray.length > 0) {
+                          const combinedAudioData = audioDataArray.join('');
+                          const arrayBuffer = new ArrayBuffer(atob(combinedAudioData).length);
+                          const view = new Uint8Array(arrayBuffer);
+                          audioContext.decodeAudioData(arrayBuffer, decodedData => {
+                            if (!source) {
+                              source = audioContext.createBufferSource();
+                              source.buffer = decodedData;
+                              source.connect(audioContext.destination);
+                              source.start(0);
+                              audio.play();
+                            } else {
+                              const newSource = audioContext.createBufferSource();
+                              newSource.buffer = decodedData;
+                              newSource.connect(audioContext.destination);
+                              newSource.start(0);
+                              // Stop the previous source after a short delay
+                              setTimeout(() => source.stop(), 100);
+                              source = newSource;
+                              audio.play();
+                            }
+                            audioDataArray = [];
+                          });
+                        }
+                      }
+                    }
+                  };
+                  eventSource.onerror = error => {
+                    console.error("Error in SSE connection.", error);
+                  };
+                } else {
+                  console.error("Server did not return an event stream.");
+                }
+              })
+           .catch(error => {
+                console.error("Error sending audio to server.", error);
+              });
+          };
+        })
+     .catch(error => {
+          console.error("Error accessing media devices.", error);
+        });
+
+      this.disabled = true;
+      document.getElementById("stopRecord").disabled = false;
+    });
+
+    document.getElementById("stopRecord").addEventListener("click", function () {
+      mediaRecorder.stop();
+      this.disabled = true;
+      document.getElementById("startRecord").disabled = false;
+
+      if (eventSource) {
+        eventSource.close();
+        if (source) {
+          source.stop();
+        }
+      }
+    });
+  </script>
+</body>
+
+</html>
